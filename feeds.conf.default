@@ -1,0 +1,7 @@
+src-git packages https://github.com/immortalwrt/packages.git;openwrt-23.05
+src-git luci https://github.com/immortalwrt/luci.git;openwrt-23.05
+src-git routing https://github.com/openwrt/routing.git;openwrt-23.05
+src-git telephony https://github.com/openwrt/telephony.git;openwrt-23.05
+src-git-full modem https://github.com/ZJJCKA/5G-Modem-Support
+src-git qmodem https://github.com/FUjr/modem_feeds.git;main
+src-git istore https://github.com/linkease/istore;main

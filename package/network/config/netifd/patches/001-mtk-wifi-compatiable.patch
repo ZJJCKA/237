@@ -1,0 +1,77 @@
+diff -u -r a/scripts/netifd-wireless.sh b/scripts/netifd-wireless.sh
+--- a/scripts/netifd-wireless.sh	2024-01-04 20:35:43.000000000 +0800
++++ b/scripts/netifd-wireless.sh	2024-10-07 16:06:28.975463169 +0800
+@@ -306,7 +306,7 @@
+ 	json_get_vars isolate proxy_arp
+ 
+ 	[ ${isolate:-0} -gt 0 -o -z "$network_bridge" ] && return
+-	[ ${multicast_to_unicast:-1} -gt 0 -o ${proxy_arp:-0} -gt 0 ] && json_add_boolean isolate 1
++	#[ ${multicast_to_unicast:-1} -gt 0 -o ${proxy_arp:-0} -gt 0 ] && json_add_boolean isolate 1
+ }
+ 
+ for_each_interface() {
+diff -u -r a/wireless.c b/wireless.c
+--- a/wireless.c	2024-01-04 20:35:43.000000000 +0800
++++ b/wireless.c	2024-10-07 16:09:13.089980980 +0800
+@@ -1124,16 +1124,16 @@
+ {
+ 	struct wireless_station *sta;
+ 	struct blob_attr *tb[__STA_ATTR_MAX];
+-	struct blob_attr *cur;
++//	struct blob_attr *cur;
+ 	char *name_buf;
+ 	char name[8];
+ 
+ 	blobmsg_parse(sta_policy, __STA_ATTR_MAX, tb, blob_data(data), blob_len(data));
+-
++/*
+ 	cur = tb[STA_ATTR_DISABLED];
+ 	if (cur && blobmsg_get_bool(cur))
+ 		return;
+-
++*/
+ 	sprintf(name, "%d", vif->sta_idx++);
+ 
+ 	sta = calloc_a(sizeof(*sta),
+@@ -1164,16 +1164,16 @@
+ {
+ 	struct wireless_vlan *vlan;
+ 	struct blob_attr *tb[__VLAN_ATTR_MAX];
+-	struct blob_attr *cur;
++//	struct blob_attr *cur;
+ 	char *name_buf;
+ 	char name[8];
+ 
+ 	blobmsg_parse(vlan_policy, __VLAN_ATTR_MAX, tb, blob_data(data), blob_len(data));
+ 
+-	cur = tb[VLAN_ATTR_DISABLED];
++	/*cur = tb[VLAN_ATTR_DISABLED];
+ 	if (cur && blobmsg_get_bool(cur))
+ 		return;
+-
++	*/
+ 	sprintf(name, "%d", vif->vlan_idx++);
+ 
+ 	vlan = calloc_a(sizeof(*vlan), &name_buf, strlen(name) + 1);
+@@ -1204,17 +1204,17 @@
+ {
+ 	struct wireless_interface *vif;
+ 	struct blob_attr *tb[__VIF_ATTR_MAX];
+-	struct blob_attr *cur;
++//	struct blob_attr *cur;
+ 	char *name_buf;
+ 	char name[8];
+ 
+ 	blobmsg_parse(vif_policy, __VIF_ATTR_MAX, tb, blob_data(data), blob_len(data));
+ 
+-	cur = tb[VIF_ATTR_DISABLED];
++	/*cur = tb[VIF_ATTR_DISABLED];
+ 	if (cur && blobmsg_get_bool(cur))
+ 		return NULL;
+-
+-	sprintf(name, "%d", wdev->vif_idx++);
++	*/
++	sprintf(name, "%d", wdev->vif_idx++);
+ 
+ 	vif = calloc_a(sizeof(*vif),
+ 		       &name_buf, strlen(name) + 1);
