@@ -57,7 +57,7 @@ jobs:
               PACKAGE_qmodem_monitor \
               PACKAGE_kmod-rmnet-nss \
               PACKAGE_rd05a1; do
-              grep -n -A 12 -B 3 "^config $symbol$" tmp/.config-package.in || true
+              grep -n -A 16 -B 4 "config $symbol" tmp/.config-package.in || true
             done
             echo "A recursive Kconfig package dependency was found." >&2
             exit 1
