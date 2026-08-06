@@ -46,6 +46,19 @@ jobs:
           fi
 
           if grep -F "recursive dependency detected" "$log_file"; then
+            for symbol in \
+              PACKAGE_luci-app-qmodem \
+              PACKAGE_luci-app-qmodem-mwan \
+              PACKAGE_luci-app-qmodem-next \
+              PACKAGE_luci-app-qmodem-sms \
+              PACKAGE_luci-app-qmodem-hc \
+              PACKAGE_luci-app-qmodem-monitor \
+              PACKAGE_luci-app-qmodem-ttl \
+              PACKAGE_qmodem_monitor \
+              PACKAGE_kmod-rmnet-nss \
+              PACKAGE_rd05a1; do
+              grep -n -A 12 -B 3 "^config $symbol$" tmp/.config-package.in || true
+            done
             echo "A recursive Kconfig package dependency was found." >&2
             exit 1
           fi

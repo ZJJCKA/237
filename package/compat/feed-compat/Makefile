@@ -53,6 +53,16 @@ define KernelPackage/rmnet-nss/description
  Disabled compatibility entry for a Qualcomm NSS-only QModem package.
 endef
 
+define KernelPackage/qca-nss-drv
+  SUBMENU:=Network Devices
+  TITLE:=Qualcomm NSS core driver (unsupported on this target)
+  DEPENDS:=@BROKEN
+endef
+
+define KernelPackage/qca-nss-drv/description
+ Disabled compatibility entry for a Qualcomm NSS-only kernel dependency.
+endef
+
 # The newest 5G-Modem-Support feed still references a removed optional helper.
 # Marking it BROKEN also makes bwallocate unselectable instead of pretending
 # that its traffic-throttling implementation exists.
@@ -72,4 +82,5 @@ $(eval $(call KernelPackage,mhi-pci-generic))
 $(eval $(call KernelPackage,mhi-wwan))
 $(eval $(call KernelPackage,mtk-t7xx))
 $(eval $(call KernelPackage,rmnet-nss))
+$(eval $(call KernelPackage,qca-nss-drv))
 $(eval $(call BuildPackage,ext-throttle))
