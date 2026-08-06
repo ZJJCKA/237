@@ -33,9 +33,23 @@ jobs:
           ./scripts/feeds update -a 2>&1 | tee -a "$log_file"
           ./scripts/feeds install -a 2>&1 | tee -a "$log_file"
           cp defconfig/mt7986-ax6000.config .config
+
+          # Feed indexing necessarily scans core packages before their feed
+          # providers are installed. Only the final, fully installed metadata
+          # pass represents unresolved dependencies.
+          : > "$log_file"
           make defconfig 2>&1 | tee -a "$log_file"
 
           if grep -E "WARNING: Makefile .* has (a dependency|a build dependency) on .*which does not exist" "$log_file"; then
             echo "Unresolved package metadata dependencies were found." >&2
             exit 1
           fi
+
+          if grep -F "recursive dependency detected" "$log_file"; then
+            echo "A recursive Kconfig package dependency was found." >&2
+            exit 1
+          fi
+
+          grep -Fqx 'GO_VERSION_MAJOR_MINOR:=1.26' package/lang/golang/golang1.26/Makefile
+          grep -Fqx 'GO_VERSION_PATCH:=5' package/lang/golang/golang1.26/Makefile
+          grep -Fqx 'PKG_VERSION:=1.89.0' package/lang/rust/Makefile
