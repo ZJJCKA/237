@@ -25,6 +25,10 @@ include $(INCLUDE_DIR)/host-build.mk
 include $(INCLUDE_DIR)/package.mk
 include $(TOPDIR)/feeds/packages/lang/rust/rust-values.mk
 
+# Rust 1.89 needs the target linker to be selected explicitly. This is the
+# only rust-values.mk change required beyond the 23.05 feed helper.
+CARGO_RUSTFLAGS+=-Clink-arg=-fuse-ld=$(TARGET_LINKER)
+
 define Package/rust
   SECTION:=lang
   CATEGORY:=Languages
