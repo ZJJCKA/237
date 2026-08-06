@@ -6,5 +6,8 @@ src-git luci https://github.com/immortalwrt/luci.git^8ceae5a1701eddbf08468918523
 src-git routing https://github.com/openwrt/routing.git^fa22ff1f05662f2ea456aaff6745ee3da519c1f7
 src-git telephony https://github.com/openwrt/telephony.git^98c8a5aa4624312ed758e2e2b6d4039050a1649d
 src-git-full modem https://github.com/ZJJCKA/5G-Modem-Support^83fc071418a4cbe51405853c089250e0091735f0
-src-git qmodem https://github.com/FUjr/modem_feeds.git^bff7500404fad884b3daeb7495c0d2126cbcdb96
+# Newer QModem revisions require post-5.4 T7xx/NSS metadata and create
+# recursive Kconfig dependencies in the 23.05 package parser. This is the
+# newest revision before those incompatible driver selections were added.
+src-git qmodem https://github.com/FUjr/modem_feeds.git^7afbeba9397f50a22e6c24aa06cc4a73b288eaff
 src-git istore https://github.com/linkease/istore^7c5c69796fd9798610a56a80e1895aa9033e1e6c
