@@ -1,0 +1,41 @@
+name: Package metadata
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build metadata prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends \
+            build-essential clang flex bison gawk gcc-multilib g++-multilib \
+            gettext git libelf-dev libncurses-dev libssl-dev python3-setuptools \
+            rsync swig unzip zlib1g-dev file wget
+
+      - name: Validate feeds and package metadata
+        shell: bash
+        run: |
+          set -euo pipefail
+          log_file="$(mktemp)"
+
+          ./scripts/feeds update -a 2>&1 | tee -a "$log_file"
+          ./scripts/feeds install -a 2>&1 | tee -a "$log_file"
+          cp defconfig/mt7986-ax6000.config .config
+          make defconfig 2>&1 | tee -a "$log_file"
+
+          if grep -E "WARNING: Makefile .* has (a dependency|a build dependency) on .*which does not exist" "$log_file"; then
+            echo "Unresolved package metadata dependencies were found." >&2
+            exit 1
+          fi
