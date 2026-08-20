@@ -1,0 +1,172 @@
+#!/bin/sh /etc/rc.common
+
+# Enable the BPI-R3 Mini LTE LED by cycling CFUN on a TD Tech MT5700M-CN.
+# The operation is limited to this board and USB modem and runs once per boot.
+
+START=99
+STOP=15
+USE_PROCD=1
+
+SERVICE_TAG="sendat-cfun"
+DONE_FILE="/tmp/sendat-cfun.done"
+READY_FILE="/tmp/sendat-cfun.ready"
+MAX_WAIT=120
+
+log_message()
+{
+	local priority="$1"
+	shift
+	logger -t "${SERVICE_TAG}" -p "daemon.${priority}" -- "$*"
+}
+
+is_bpi_r3_mini()
+{
+	local board_info
+
+	board_info="$({
+		cat /tmp/sysinfo/board_name 2>/dev/null
+		cat /tmp/sysinfo/model 2>/dev/null
+		tr '\000' ' ' < /proc/device-tree/model 2>/dev/null
+	} | tr 'A-Z_' 'a-z-')"
+
+	echo "${board_info}" | grep -qiE 'bpi[- ]?r3[- ]?mini'
+}
+
+is_mt5700_present()
+{
+	local device vendor product
+
+	for device in /sys/bus/usb/devices/*; do
+		[ -r "${device}/idVendor" ] || continue
+		[ -r "${device}/idProduct" ] || continue
+
+		vendor="$(cat "${device}/idVendor" 2>/dev/null)"
+		product="$(cat "${device}/idProduct" 2>/dev/null)"
+		[ "${vendor}:${product}" = "3466:3301" ] && return 0
+	done
+
+	return 1
+}
+
+find_mt5700_at_port()
+{
+	local modem_number modem_no modem_name manufacturer at_port
+
+	modem_number="$(uci -q get modem.@global[0].modem_number)"
+	case "${modem_number}" in
+		''|*[!0-9]*) modem_number=0 ;;
+	esac
+
+	modem_no=0
+	while [ "${modem_no}" -lt "${modem_number}" ]; do
+		modem_name="$(uci -q get modem.modem${modem_no}.name | tr 'A-Z' 'a-z')"
+		manufacturer="$(uci -q get modem.modem${modem_no}.manufacturer | tr 'A-Z' 'a-z')"
+		at_port="$(uci -q get modem.modem${modem_no}.at_port)"
+
+		case "${modem_name}" in
+			*mt5700*)
+				[ "${manufacturer}" = "tdtech" ] && [ -c "${at_port}" ] && {
+					echo "${at_port}"
+					return 0
+				}
+				;;
+		esac
+
+		modem_no=$((modem_no + 1))
+	done
+
+	# MT5700M-CN on the BPI-R3 Mini exposes its tested AT channel as ttyUSB1.
+	[ -c /dev/ttyUSB1 ] && {
+		echo /dev/ttyUSB1
+		return 0
+	}
+
+	return 1
+}
+
+run_mt5700_led_init()
+{
+	local elapsed at_port port_number response
+
+	[ -e "${DONE_FILE}" ] && return 0
+
+	if ! is_bpi_r3_mini; then
+		log_message info "Not a BPI-R3 Mini; skipping MT5700 LTE LED initialization"
+		return 0
+	fi
+
+	if ! command -v sendat >/dev/null 2>&1; then
+		log_message err "sendat is not installed"
+		return 1
+	fi
+
+	elapsed=0
+	at_port=""
+	while [ "${elapsed}" -lt "${MAX_WAIT}" ]; do
+		if is_mt5700_present; then
+			at_port="$(find_mt5700_at_port)"
+			[ -n "${at_port}" ] && break
+		fi
+
+		sleep 2
+		elapsed=$((elapsed + 2))
+	done
+
+	if [ -z "${at_port}" ]; then
+		log_message warning "MT5700M-CN or its AT port was not ready after ${MAX_WAIT} seconds"
+		return 1
+	fi
+
+	case "${at_port}" in
+		/dev/ttyUSB[0-9]*) port_number="${at_port#/dev/ttyUSB}" ;;
+		*)
+			log_message err "Unsupported MT5700 AT port: ${at_port}"
+			return 1
+			;;
+	esac
+
+	# Keep the delay used by the proven standalone script, then confirm the
+	# device is still present before changing its radio state.
+	sleep 20
+	[ -c "${at_port}" ] || {
+		log_message warning "MT5700 AT port disappeared before LTE LED initialization"
+		return 1
+	}
+
+	log_message notice "Sending AT+CFUN=0 through ${at_port}"
+	response="$(sendat "${port_number}" 'AT+CFUN=0' 2>&1)"
+	if ! echo "${response}" | grep -q 'OK'; then
+		log_message err "AT+CFUN=0 failed: ${response}"
+		return 1
+	fi
+
+	sleep 2
+
+	log_message notice "Sending AT+CFUN=1 through ${at_port}"
+	response="$(sendat "${port_number}" 'AT+CFUN=1' 2>&1)"
+	if ! echo "${response}" | grep -q 'OK'; then
+		log_message err "AT+CFUN=1 failed: ${response}"
+		return 1
+	fi
+
+	touch "${DONE_FILE}"
+	# at-webserver waits for this marker before it opens ttyUSB1, preventing
+	# its first probe from racing the one-shot CFUN radio cycle.
+	touch "${READY_FILE}"
+	log_message notice "MT5700 LTE LED initialization completed"
+}
+
+run_worker()
+{
+	run_mt5700_led_init
+}
+
+start_service()
+{
+	# Let procd track the one-shot worker without delaying the boot sequence.
+	procd_open_instance
+	procd_set_param command /etc/init.d/sendat-cfun run_worker
+	procd_set_param stdout 1
+	procd_set_param stderr 1
+	procd_close_instance
+}

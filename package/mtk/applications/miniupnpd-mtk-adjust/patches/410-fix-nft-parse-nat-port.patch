@@ -1,0 +1,13 @@
+--- a/netfilter_nft/nftnlrdr_misc.c
++++ b/netfilter_nft/nftnlrdr_misc.c
+@@ -301,9 +301,7 @@
+ 	reg_val_ptr = get_reg_val_ptr(r, addr_min_reg);
+ 	if (reg_val_ptr != NULL) {
+ 		r->nat_addr = (in_addr_t)*reg_val_ptr;
+-		if (proto_min_reg == NFT_REG_1) {
+-			r->nat_port = proto_min_val;
+-		}
++		r->nat_port = proto_min_val;
+ 	} else {
+ 		syslog(LOG_ERR, "%s: invalid addr_min_reg %u", "parse_rule_nat", addr_min_reg);
+ 	}

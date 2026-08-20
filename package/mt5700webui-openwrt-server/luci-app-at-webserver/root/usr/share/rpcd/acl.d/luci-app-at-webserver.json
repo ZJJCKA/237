@@ -1,0 +1,28 @@
+{
+	"luci-app-at-webserver": {
+		"description": "Grant access to luci-app-at-webserver",
+		"read": {
+			"uci": [ "at-webserver" ],
+			"ubus": {
+				"file": [ "list", "read", "stat" ],
+				"service": [ "list" ]
+			},
+			"file": {
+				"/dev": [ "list" ],
+				"/tmp/at-notifications.log": [ "read", "stat" ],
+				"/var/log/at-notifications.log": [ "read", "stat" ]
+			}
+		},
+		"write": {
+			"uci": [ "at-webserver" ],
+			"ubus": {
+				"file": [ "write" ],
+				"luci": [ "setInitAction" ]
+			},
+			"file": {
+				"/tmp/at-notifications.log": [ "write" ],
+				"/var/log/at-notifications.log": [ "write" ]
+			}
+		}
+	}
+}

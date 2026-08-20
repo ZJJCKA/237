@@ -1,0 +1,5 @@
+--- a/mt_wifi/embedded/common/multi_profile.c
++++ b/mt_wifi/embedded/common/multi_profile.c
+@@ -301 +301 @@
+-	srcf = os_file_open(fname, O_WRONLY | O_CREAT, 0);
++	srcf = os_file_open(fname, O_WRONLY | O_CREAT | O_TRUNC, 0);

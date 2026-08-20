@@ -1,0 +1,25 @@
+#!/bin/sh /etc/rc.common
+# Copyright (C) 2023 Siriling <168620188@qq.com>
+START=5
+STOP=1
+start() {
+  nohup bash -c "sleep 3;/usr/bin/fancontrol > /dev/null 2>&1 &" &
+  echo "start"
+}
+stop() {
+    echo 0 > /sys/class/hwmon/hwmon2/pwm1
+    local PIDS=$(pgrep -f fancontrol)
+    if [ -n "$PIDS" ]; then
+        for PID in $PIDS; do
+            kill $PID
+        done
+    fi
+    sleep 1
+}
+
+restart() {
+  stop
+  start
+}
+~
+

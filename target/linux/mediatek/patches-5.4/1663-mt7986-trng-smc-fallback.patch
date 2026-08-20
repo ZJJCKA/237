@@ -1,0 +1,87 @@
+From: Local Build <builder@localhost>
+Subject: [PATCH] hwrng: mtk: fall back to SMC when MT7986 MMIO is blocked
+
+Newer MediaTek TF-A releases can block non-secure MMIO access to the
+MT7986 TRNG. Detect that condition and reuse the existing TRNGv2 SMC
+reader while keeping the RNG clock enabled for secure firmware.
+
+---
+ drivers/char/hw_random/mtk-rng.c | 50 ++++++++++++++++++++++++++------
+ 1 file changed, 41 insertions(+), 9 deletions(-)
+
+--- a/drivers/char/hw_random/mtk-rng.c
++++ b/drivers/char/hw_random/mtk-rng.c
+@@ -128,9 +128,34 @@ static int mtk_rngv2_read(struct hwrng *
+ 	return retval || !wait ? retval : -EIO;
+ }
+ 
++static bool mtk_rng_hw_accessible(struct mtk_rng *priv)
++{
++	u32 val;
++	int err;
++
++	err = clk_prepare_enable(priv->clk);
++	if (err)
++		return false;
++
++	val = readl(priv->base + RNG_CTRL);
++	val |= RNG_EN;
++	writel(val, priv->base + RNG_CTRL);
++
++	val = readl(priv->base + RNG_CTRL);
++	if (val & RNG_EN) {
++		writel(val & ~RNG_EN, priv->base + RNG_CTRL);
++		clk_disable_unprepare(priv->clk);
++		return true;
++	}
++
++	/* TF-A blocked MMIO. Keep the clock enabled for the SMC path. */
++	return false;
++}
++
+ static int mtk_rng_probe(struct platform_device *pdev)
+ {
+ 	struct resource *res;
++	bool use_smc = false;
+ 	int ret;
+ 	struct mtk_rng *priv;
+ 
+@@ -157,16 +182,29 @@ static int mtk_rng_probe(struct platform
+ 			return ret;
+ 		}
+ 
++		if (IS_ENABLED(CONFIG_HAVE_ARM_SMCCC) &&
++		    of_device_is_compatible(pdev->dev.of_node,
++					    "mediatek,mt7986-rng") &&
++		    !mtk_rng_hw_accessible(priv)) {
++			use_smc = true;
++			dev_info(&pdev->dev,
++				 "HW RNG not MMIO accessible, using SMC\n");
++		}
++
+ #ifndef CONFIG_PM
+-		priv->rng.init = mtk_rng_init;
+-		priv->rng.cleanup = mtk_rng_cleanup;
++		if (!use_smc) {
++			priv->rng.init = mtk_rng_init;
++			priv->rng.cleanup = mtk_rng_cleanup;
++		}
+ #endif
+-		priv->rng.read = mtk_rng_read;
++		priv->rng.read = use_smc ? mtk_rngv2_read : mtk_rng_read;
+ 
+-		pm_runtime_set_autosuspend_delay(&pdev->dev,
+-						 RNG_AUTOSUSPEND_TIMEOUT);
+-		pm_runtime_use_autosuspend(&pdev->dev);
+-		pm_runtime_enable(&pdev->dev);
++		if (!use_smc) {
++			pm_runtime_set_autosuspend_delay(&pdev->dev,
++							 RNG_AUTOSUSPEND_TIMEOUT);
++			pm_runtime_use_autosuspend(&pdev->dev);
++			pm_runtime_enable(&pdev->dev);
++		}
+ 	} else {
+ 		priv->rng.read = mtk_rngv2_read;
+ 	}
+-- 
+2.50.1

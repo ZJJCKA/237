@@ -1,0 +1,41 @@
+From: R3 MINI warning cleanup <noreply@local>
+Subject: [PATCH] net: dsa: make FDB port helpers const-correct
+
+The 5.12 switchdev backport obtains the DSA port through dsa_to_port(),
+which returns a const pointer in the 5.4 DSA API. The FDB helpers only
+read the port and pass it to dsa_port_notify(), which already accepts a
+const pointer. Match their declarations and definitions to that contract.
+
+--- a/net/dsa/dsa_priv.h
++++ b/net/dsa/dsa_priv.h
+@@ -154,8 +154,8 @@ int dsa_port_vlan_del(struct dsa_port *d
+ int dsa_port_ageing_time(struct dsa_port *dp, clock_t ageing_clock,
+ 			 struct switchdev_trans *trans);
+-int dsa_port_fdb_add(struct dsa_port *dp, const unsigned char *addr,
++int dsa_port_fdb_add(const struct dsa_port *dp, const unsigned char *addr,
+ 		     u16 vid);
+-int dsa_port_fdb_del(struct dsa_port *dp, const unsigned char *addr,
++int dsa_port_fdb_del(const struct dsa_port *dp, const unsigned char *addr,
+ 		     u16 vid);
+ int dsa_port_fdb_dump(struct dsa_port *dp, dsa_fdb_dump_cb_t *cb, void *data);
+ int dsa_port_mdb_add(const struct dsa_port *dp,
+--- a/net/dsa/port.c
++++ b/net/dsa/port.c
+@@ -430,7 +430,7 @@ int dsa_port_mrouter(struct dsa_port *dp
+ 	return ds->ops->port_egress_floods(ds, port, true, mrouter);
+ }
+ 
+-int dsa_port_fdb_add(struct dsa_port *dp, const unsigned char *addr,
++int dsa_port_fdb_add(const struct dsa_port *dp, const unsigned char *addr,
+ 		     u16 vid)
+ {
+ 	struct dsa_notifier_fdb_info info = {
+@@ -443,7 +443,7 @@ int dsa_port_fdb_add(struct dsa_port *dp
+ 	return dsa_port_notify(dp, DSA_NOTIFIER_FDB_ADD, &info);
+ }
+ 
+-int dsa_port_fdb_del(struct dsa_port *dp, const unsigned char *addr,
++int dsa_port_fdb_del(const struct dsa_port *dp, const unsigned char *addr,
+ 		     u16 vid)
+ {
+ 	struct dsa_notifier_fdb_info info = {

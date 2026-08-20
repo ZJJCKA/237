@@ -1,0 +1,44 @@
+#!/bin/sh
+
+. /lib/functions.sh
+. /lib/functions/system.sh
+
+[ "$(board_name)" = "bananapi,bpi-r3mini-emmc" ] || exit 0
+
+base_mac="$(macaddr_generate_from_mmc_cid mmcblk0)"
+[ -n "$base_mac" ] || exit 1
+
+eth0_mac="$base_mac"
+eth1_mac="$(macaddr_add "$base_mac" 1)"
+
+set_device_mac()
+{
+	local device="$1"
+	local mac="$2"
+	local section
+	local found=0
+
+	for section in $(uci -q show network | \
+		sed -n 's/^network\.\([^=]*\)=device$/\1/p'); do
+		[ "$(uci -q get "network.$section.name")" = "$device" ] || continue
+		uci set "network.$section.macaddr=$mac"
+		found=1
+	done
+
+	[ "$found" -eq 1 ] && return 0
+
+	section="r3mini_${device}"
+	uci -q delete "network.$section"
+	uci set "network.$section=device"
+	uci set "network.$section.name=$device"
+	uci set "network.$section.macaddr=$mac"
+}
+
+set_device_mac eth0 "$eth0_mac"
+set_device_mac eth1 "$eth1_mac"
+set_device_mac br-lan "$eth0_mac"
+
+uci set "network.lan.macaddr=$eth0_mac"
+uci commit network
+
+exit 0

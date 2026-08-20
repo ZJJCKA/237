@@ -1,0 +1,12 @@
+#!/bin/sh
+
+. /lib/functions.sh
+. /lib/functions/system.sh
+
+[ "$(board_name)" = "bananapi,bpi-r3mini-emmc" ] || exit 0
+uci -q get upnpd.config >/dev/null 2>&1 || exit 0
+
+uci set upnpd.config.secure_mode='1'
+uci commit upnpd
+
+exit 0

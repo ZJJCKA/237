@@ -1,0 +1,10 @@
+--- a/kernel/module.c
++++ b/kernel/module.c
+@@ -1284 +1284 @@
+-static int try_to_force_load(struct module *mod, const char *reason)
++static int __maybe_unused try_to_force_load(struct module *mod, const char *reason)
+--- a/drivers/net/dsa/mt7530.h
++++ b/drivers/net/dsa/mt7530.h
+@@ -651 +651 @@
+-static const char *p5_intf_modes(unsigned int p5_interface)
++static inline const char *p5_intf_modes(unsigned int p5_interface)

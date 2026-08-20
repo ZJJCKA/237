@@ -1,0 +1,450 @@
+#!/bin/sh
+
+set -f
+umask 077
+
+CACHE_DIR=/var/run/fancontrol-sensors
+POLL_INTERVAL=5
+TEMP_MIN_MC=-40000
+TEMP_MAX_MC=150000
+IWPRIV_SEQUENCE=0
+IWPRIV_ACTIVE_PID=
+IWPRIV_ACTIVE_IDENTITY=
+IWPRIV_RUN_DIR=
+IWPRIV_OUTPUT_FILE=
+IWPRIV_OUTPUT=
+IWPRIV_PROCESS_STATE=UNKNOWN
+IWPRIV_PROCESS_IDENTITY=
+IWPRIV_DISABLED_INTERFACES=
+IWPRIV_RA0_PID=
+IWPRIV_RA0_IDENTITY=
+IWPRIV_RAX0_PID=
+IWPRIV_RAX0_IDENTITY=
+WIFI_TEMPERATURE_RESULT=
+
+log_message()
+{
+    logger -t fancontrol-sensors "$*"
+}
+
+valid_integer()
+{
+    local value="$1" digits
+    case "$value" in
+        -*) digits="${value#-}" ;;
+        *) digits="$value" ;;
+    esac
+    case "$digits" in ''|*[!0-9]*) return 1 ;; esac
+    return 0
+}
+
+valid_temperature_mc()
+{
+    valid_integer "$1" || return 1
+    [ "$1" -ge "$TEMP_MIN_MC" ] 2>/dev/null || return 1
+    [ "$1" -le "$TEMP_MAX_MC" ] 2>/dev/null || return 1
+    return 0
+}
+
+read_uptime_seconds()
+{
+    local value
+    value="$(cat /proc/uptime 2>/dev/null)"
+    value="${value%% *}"
+    value="${value%%.*}"
+    case "$value" in ''|*[!0-9]*) return 1 ;; esac
+    printf '%s\n' "$value"
+}
+
+prepare_cache_dir()
+{
+    if [ -e "$CACHE_DIR" ] || [ -L "$CACHE_DIR" ]; then
+        [ -d "$CACHE_DIR" ] && [ ! -L "$CACHE_DIR" ] || return 1
+    else
+        umask 077
+        mkdir -p "$CACHE_DIR" || return 1
+    fi
+    chown 0:0 "$CACHE_DIR" 2>/dev/null || return 1
+    chmod 0700 "$CACHE_DIR" 2>/dev/null || return 1
+    trusted_path "$CACHE_DIR" d 0700
+}
+
+trusted_path()
+{
+    local path="$1" kind="$2" permission="$3" found
+    [ -e "$path" ] && [ ! -L "$path" ] || return 1
+    found="$(find "$path" -xdev -maxdepth 0 -type "$kind" \
+        -user 0 -group 0 -perm "$permission" -print 2>/dev/null)"
+    [ "$found" = "$path" ]
+}
+
+read_process_identity()
+{
+    local record
+    record="$(read_process_record "$1")" || return 1
+    printf '%s\n' "${record#* }"
+}
+
+read_process_record()
+{
+    local pid="$1" stat_line fields
+    case "$pid" in ''|*[!0-9]*) return 1 ;; esac
+    [ -r "/proc/$pid/stat" ] || return 1
+    IFS= read -r stat_line < "/proc/$pid/stat" || return 1
+    fields="${stat_line##*) }"
+    [ "$fields" != "$stat_line" ] || return 1
+    set -- $fields
+    [ "$#" -ge 20 ] || return 1
+    case "$2:${20}" in *[!0-9:]*) return 1 ;; esac
+    printf '%s %s:%s\n' "$1" "$2" "${20}"
+}
+
+classify_iwpriv_process()
+{
+    local pid="$1" expected="$2" record state current parent
+
+    IWPRIV_PROCESS_STATE=UNKNOWN
+    IWPRIV_PROCESS_IDENTITY="$expected"
+    case "$pid" in ''|*[!0-9]*) return 0 ;; esac
+
+    if [ ! -e "/proc/$pid" ]; then
+        IWPRIV_PROCESS_STATE=REAPABLE
+        return 0
+    fi
+
+    record="$(read_process_record "$pid")" || return 0
+    state="${record%% *}"
+    current="${record#* }"
+    if [ -n "$expected" ]; then
+        [ "$current" = "$expected" ] || return 0
+    else
+        parent="${current%%:*}"
+        [ "$parent" = "$$" ] || return 0
+        IWPRIV_PROCESS_IDENTITY="$current"
+    fi
+
+    case "$state" in
+        Z|X|x) IWPRIV_PROCESS_STATE=REAPABLE ;;
+        *) IWPRIV_PROCESS_STATE=ACTIVE ;;
+    esac
+}
+
+iwpriv_interface_disabled()
+{
+    case " $IWPRIV_DISABLED_INTERFACES " in
+        *" $1 "*) return 0 ;;
+    esac
+    return 1
+}
+
+disable_iwpriv_interface()
+{
+    iwpriv_interface_disabled "$1" || \
+        IWPRIV_DISABLED_INTERFACES="${IWPRIV_DISABLED_INTERFACES:+$IWPRIV_DISABLED_INTERFACES }$1"
+}
+
+enable_iwpriv_interface()
+{
+    local interface="$1" item enabled=""
+
+    for item in $IWPRIV_DISABLED_INTERFACES; do
+        [ "$item" = "$interface" ] && continue
+        enabled="${enabled:+$enabled }$item"
+    done
+    IWPRIV_DISABLED_INTERFACES="$enabled"
+}
+
+remember_stuck_iwpriv()
+{
+    case "$1" in
+        ra0)
+            IWPRIV_RA0_PID="$2"
+            IWPRIV_RA0_IDENTITY="$3"
+        ;;
+        rax0)
+            IWPRIV_RAX0_PID="$2"
+            IWPRIV_RAX0_IDENTITY="$3"
+        ;;
+    esac
+}
+
+reap_stuck_iwpriv()
+{
+    local interface pid identity
+    for interface in ra0 rax0; do
+        case "$interface" in
+            ra0) pid="$IWPRIV_RA0_PID"; identity="$IWPRIV_RA0_IDENTITY" ;;
+            rax0) pid="$IWPRIV_RAX0_PID"; identity="$IWPRIV_RAX0_IDENTITY" ;;
+        esac
+        [ -n "$pid" ] || continue
+        classify_iwpriv_process "$pid" "$identity"
+        [ "$IWPRIV_PROCESS_STATE" = REAPABLE ] || continue
+        wait "$pid" 2>/dev/null || :
+        case "$interface" in
+            ra0) IWPRIV_RA0_PID=; IWPRIV_RA0_IDENTITY= ;;
+            rax0) IWPRIV_RAX0_PID=; IWPRIV_RAX0_IDENTITY= ;;
+        esac
+        # A radio reload can temporarily wedge iwpriv. Keep the interface
+        # blocked only while that exact child is still unreapable; once the
+        # child has gone, let the next five-second collection round retry it.
+        enable_iwpriv_interface "$interface"
+    done
+}
+
+terminate_stuck_iwpriv()
+{
+    local interface pid identity
+    for interface in ra0 rax0; do
+        case "$interface" in
+            ra0) pid="$IWPRIV_RA0_PID"; identity="$IWPRIV_RA0_IDENTITY" ;;
+            rax0) pid="$IWPRIV_RAX0_PID"; identity="$IWPRIV_RAX0_IDENTITY" ;;
+        esac
+        [ -n "$pid" ] || continue
+        classify_iwpriv_process "$pid" "$identity"
+        if [ "$IWPRIV_PROCESS_STATE" = ACTIVE ]; then
+            kill -TERM "$pid" 2>/dev/null || :
+            classify_iwpriv_process "$pid" "$IWPRIV_PROCESS_IDENTITY"
+            [ "$IWPRIV_PROCESS_STATE" = ACTIVE ] && \
+                kill -KILL "$pid" 2>/dev/null || :
+        fi
+    done
+    reap_stuck_iwpriv
+}
+
+cleanup_iwpriv_run()
+{
+    [ -z "$IWPRIV_OUTPUT_FILE" ] || rm -f "$IWPRIV_OUTPUT_FILE"
+    [ -z "$IWPRIV_RUN_DIR" ] || rmdir "$IWPRIV_RUN_DIR" 2>/dev/null || :
+    IWPRIV_RUN_DIR=
+    IWPRIV_OUTPUT_FILE=
+}
+
+write_cache()
+{
+    local source="$1" temperature="$2" sample temporary
+    valid_temperature_mc "$temperature" || return 1
+    sample="$(read_uptime_seconds)" || return 1
+    [ "$source" = "wifi" ] || return 1
+    temporary="$CACHE_DIR/.${source}.$$"
+    [ ! -e "$temporary" ] && [ ! -L "$temporary" ] || return 1
+
+    umask 077
+    {
+        printf 'version=1\n'
+        printf 'temp_mc=%s\n' "$temperature"
+        printf 'sample_uptime=%s\n' "$sample"
+    } > "$temporary" || {
+        rm -f "$temporary"
+        return 1
+    }
+    chown 0:0 "$temporary" 2>/dev/null && chmod 0600 "$temporary" 2>/dev/null || {
+        rm -f "$temporary"
+        return 1
+    }
+    trusted_path "$temporary" f 0600 || {
+        rm -f "$temporary"
+        return 1
+    }
+    mv -f "$temporary" "$CACHE_DIR/$source.status" || {
+        rm -f "$temporary"
+        return 1
+    }
+}
+
+run_iwpriv_stat()
+{
+    local interface="$1" command_pid command_identity wait_step command_rc
+
+    IWPRIV_OUTPUT=
+    reap_stuck_iwpriv
+    iwpriv_interface_disabled "$interface" && return 1
+    IWPRIV_SEQUENCE=$((IWPRIV_SEQUENCE + 1))
+    IWPRIV_RUN_DIR="$CACHE_DIR/.iwpriv.$$.$IWPRIV_SEQUENCE"
+    IWPRIV_OUTPUT_FILE="$IWPRIV_RUN_DIR/output"
+
+    umask 077
+    mkdir "$IWPRIV_RUN_DIR" 2>/dev/null || {
+        IWPRIV_RUN_DIR=
+        IWPRIV_OUTPUT_FILE=
+        return 1
+    }
+    chown 0:0 "$IWPRIV_RUN_DIR" 2>/dev/null && \
+        chmod 0700 "$IWPRIV_RUN_DIR" 2>/dev/null && \
+        trusted_path "$IWPRIV_RUN_DIR" d 0700 || {
+        cleanup_iwpriv_run
+        return 1
+    }
+    : > "$IWPRIV_OUTPUT_FILE" || {
+        cleanup_iwpriv_run
+        return 1
+    }
+    chown 0:0 "$IWPRIV_OUTPUT_FILE" 2>/dev/null && \
+        chmod 0600 "$IWPRIV_OUTPUT_FILE" 2>/dev/null && \
+        trusted_path "$IWPRIV_OUTPUT_FILE" f 0600 || {
+        cleanup_iwpriv_run
+        return 1
+    }
+
+    iwpriv "$interface" stat > "$IWPRIV_OUTPUT_FILE" 2>/dev/null &
+    IWPRIV_ACTIVE_PID=$!
+    command_pid="$IWPRIV_ACTIVE_PID"
+    IWPRIV_ACTIVE_IDENTITY=
+    command_identity="$(read_process_identity "$command_pid")"
+    IWPRIV_ACTIVE_IDENTITY="$command_identity"
+
+    wait_step=0
+    while [ "$wait_step" -lt 2 ]; do
+        classify_iwpriv_process "$command_pid" "$command_identity"
+        [ -n "$command_identity" ] || command_identity="$IWPRIV_PROCESS_IDENTITY"
+        IWPRIV_ACTIVE_IDENTITY="$command_identity"
+        [ "$IWPRIV_PROCESS_STATE" = ACTIVE ] || break
+        sleep 1
+        wait_step=$((wait_step + 1))
+    done
+
+    classify_iwpriv_process "$command_pid" "$command_identity"
+    [ -n "$command_identity" ] || command_identity="$IWPRIV_PROCESS_IDENTITY"
+    IWPRIV_ACTIVE_IDENTITY="$command_identity"
+    if [ "$IWPRIV_PROCESS_STATE" = REAPABLE ]; then
+        wait "$command_pid" 2>/dev/null
+        command_rc=$?
+        IWPRIV_ACTIVE_PID=
+        IWPRIV_ACTIVE_IDENTITY=
+        if [ "$command_rc" -eq 0 ] && trusted_path "$IWPRIV_OUTPUT_FILE" f 0600; then
+            IWPRIV_OUTPUT="$(cat "$IWPRIV_OUTPUT_FILE" 2>/dev/null)"
+            cleanup_iwpriv_run
+            return 0
+        fi
+        cleanup_iwpriv_run
+        return 1
+    fi
+
+    if [ "$IWPRIV_PROCESS_STATE" = ACTIVE ]; then
+        kill -TERM "$command_pid" 2>/dev/null || :
+        classify_iwpriv_process "$command_pid" "$command_identity"
+        [ "$IWPRIV_PROCESS_STATE" = ACTIVE ] && \
+            kill -KILL "$command_pid" 2>/dev/null || :
+    fi
+    classify_iwpriv_process "$command_pid" "$command_identity"
+    [ -n "$command_identity" ] || command_identity="$IWPRIV_PROCESS_IDENTITY"
+    if [ "$IWPRIV_PROCESS_STATE" = REAPABLE ]; then
+        wait "$command_pid" 2>/dev/null || :
+    else
+        disable_iwpriv_interface "$interface"
+        remember_stuck_iwpriv "$interface" "$command_pid" "$command_identity"
+    fi
+    IWPRIV_ACTIVE_PID=
+    IWPRIV_ACTIVE_IDENTITY=
+    cleanup_iwpriv_run
+    return 1
+}
+
+parse_iwpriv_temperature()
+{
+    awk '
+        /^[[:space:]]*CurrentTemperature[[:space:]]*=/ {
+            line = $0
+            sub(/^[[:space:]]*CurrentTemperature[[:space:]]*=[[:space:]]*/, "", line)
+            if (line ~ /^-?[0-9]+([[:space:]]|$)/) {
+                match(line, /^-?[0-9]+/)
+                token = substr(line, RSTART, RLENGTH)
+                digits = token
+                sub(/^-/, "", digits)
+                if (length(digits) <= 3) {
+                    decimal = token + 0
+                    if (decimal >= -40 && decimal <= 150) {
+                        printf "%d\n", decimal
+                        exit
+                    }
+                }
+            }
+        }
+    '
+}
+
+valid_celsius_decimal()
+{
+    case "$1" in
+        -[1-9]|-[1-3][0-9]|-40|0|[1-9]|[1-9][0-9]|1[0-4][0-9]|150)
+            return 0
+        ;;
+    esac
+    return 1
+}
+
+read_wifi_temperature()
+{
+    local input value interface output celsius highest=""
+
+    WIFI_TEMPERATURE_RESULT=
+
+    set +f
+    for input in /sys/class/ieee80211/phy*/device/hwmon/hwmon*/temp*_input \
+                 /sys/class/ieee80211/phy*/hwmon*/temp*_input; do
+        [ -r "$input" ] || continue
+        value="$(cat "$input" 2>/dev/null)"
+        valid_temperature_mc "$value" || continue
+        if [ -z "$highest" ] || [ "$value" -gt "$highest" ]; then
+            highest="$value"
+        fi
+    done
+    set -f
+
+    if command -v iwpriv >/dev/null 2>&1; then
+        for interface in ra0 rax0; do
+            [ -d "/sys/class/net/$interface" ] || continue
+            run_iwpriv_stat "$interface" || continue
+            output="$IWPRIV_OUTPUT"
+            celsius="$(printf '%s\n' "$output" | parse_iwpriv_temperature)"
+            valid_celsius_decimal "$celsius" || continue
+            value=$((celsius * 1000))
+            valid_temperature_mc "$value" || continue
+            if [ -z "$highest" ] || [ "$value" -gt "$highest" ]; then
+                highest="$value"
+            fi
+        done
+    fi
+
+    [ -n "$highest" ] || return 1
+    WIFI_TEMPERATURE_RESULT="$highest"
+    return 0
+}
+
+cleanup()
+{
+    if [ -n "$IWPRIV_ACTIVE_PID" ]; then
+        classify_iwpriv_process "$IWPRIV_ACTIVE_PID" "$IWPRIV_ACTIVE_IDENTITY"
+        if [ "$IWPRIV_PROCESS_STATE" = ACTIVE ]; then
+            kill -TERM "$IWPRIV_ACTIVE_PID" 2>/dev/null || :
+            classify_iwpriv_process "$IWPRIV_ACTIVE_PID" "$IWPRIV_PROCESS_IDENTITY"
+            [ "$IWPRIV_PROCESS_STATE" = ACTIVE ] && \
+                kill -KILL "$IWPRIV_ACTIVE_PID" 2>/dev/null || :
+        fi
+        classify_iwpriv_process "$IWPRIV_ACTIVE_PID" "$IWPRIV_ACTIVE_IDENTITY"
+        [ "$IWPRIV_PROCESS_STATE" = REAPABLE ] && \
+            wait "$IWPRIV_ACTIVE_PID" 2>/dev/null || :
+    fi
+    IWPRIV_ACTIVE_PID=
+    IWPRIV_ACTIVE_IDENTITY=
+    terminate_stuck_iwpriv
+    reap_stuck_iwpriv
+    cleanup_iwpriv_run
+    rm -f "$CACHE_DIR/.wifi.$$"
+}
+
+trap 'exit 0' HUP INT TERM
+trap cleanup EXIT
+
+if ! prepare_cache_dir; then
+    log_message "无法安全创建温度缓存目录"
+    exit 1
+fi
+
+while true; do
+    reap_stuck_iwpriv
+    read_wifi_temperature || :
+    wifi_temperature="$WIFI_TEMPERATURE_RESULT"
+    [ -z "$wifi_temperature" ] || write_cache wifi "$wifi_temperature" || true
+
+    sleep "$POLL_INTERVAL"
+done

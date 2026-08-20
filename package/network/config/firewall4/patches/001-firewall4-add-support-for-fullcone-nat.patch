@@ -1,0 +1,35 @@
+From aa3b56e289fba7425e649a608c333622ffd9c367 Mon Sep 17 00:00:00 2001
+From: Syrone Wong <wong.syrone@gmail.com>
+Date: Sat, 9 Apr 2022 13:24:19 +0800
+Subject: [PATCH] firewall4: add fullcone support
+
+fullcone is drop-in replacement of masq for non-udp traffic
+
+add runtime fullcone rule check, disable it globally if fullcone expr is
+invalid
+
+defaults.fullcone and defaults.fullcone6 are switches for IPv4 and IPv6
+respectively, most IPv6 traffic do NOT need this FullCone NAT functionality.
+
+Renew: ZiMing Mo <msylgj@immortalwrt.org>
+---
+ root/etc/config/firewall                      |  2 ++
+ root/usr/share/firewall4/templates/ruleset.uc | 16 ++++++++++++++--
+ .../firewall4/templates/zone-fullcone.uc      |  4 ++++
+ root/usr/share/ucode/fw4.uc                   | 69 ++++++++++++++++++-
+ 4 files changed, 89 insertions(+), 4 deletions(-)
+ create mode 100644 root/usr/share/firewall4/templates/zone-fullcone.uc
+
+--- a/root/etc/config/firewall
++++ b/root/etc/config/firewall
+@@ -5,6 +5,10 @@ config defaults
+ 	option forward		REJECT
+ # Uncomment this line to disable ipv6 rules
+ #	option disable_ipv6	1
++	option flow_offloading	0
++	option flow_offloading_hw	0
++	 
++	 
+ 
+ config zone
+ 	option name		lan

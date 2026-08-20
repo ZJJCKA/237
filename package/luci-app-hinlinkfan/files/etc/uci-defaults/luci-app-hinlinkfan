@@ -1,0 +1,26 @@
+#!/bin/sh
+# Copyright (C) 2023 Siriling <168620188@qq.com>
+
+uci -q get hinlinkfan.global >/dev/null || uci -q batch <<-EOF >/dev/null
+	set hinlinkfan.global=global
+	set hinlinkfan.@global[0].enable=0
+	set hinlinkfan.@global[0].on_temp=55
+	set hinlinkfan.@global[0].off_temp=50
+
+	commit hinlinkfan
+EOF
+
+chmod +x /etc/init.d/hinlinkfaninit
+chmod +x /usr/bin/fancontrol
+/etc/init.d/hinlinkfaninit enable
+
+uci -q batch <<-EOF >/dev/null
+	delete ucitrack.@hinlinkfan[-1]
+	add ucitrack hinlinkfan
+	set ucitrack.@hinlinkfan[-1].init=hinlinkfan
+	commit ucitrack
+EOF
+
+rm -rf /tmp/luci-*cache
+exit 0
+

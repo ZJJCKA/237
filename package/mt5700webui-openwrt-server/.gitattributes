@@ -1,0 +1,6 @@
+* text=auto
+*.py text eol=lf
+Makefile text eol=lf
+at-webserver/files/etc/init.d/* text eol=lf
+at-webserver/files/etc/config/* text eol=lf
+at-webserver/files/www/cgi-bin/* text eol=lf

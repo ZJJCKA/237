@@ -1,0 +1,747 @@
+#!/bin/sh
+
+set -f
+umask 077
+
+CONFIG=fancontrol
+SECTION=settings
+SPEED_FILE=/var/run/fancontrol.speed
+STATUS_FILE=/var/run/fancontrol.status
+PID_FILE=/var/run/fancontrol.pid
+LOCK_FILE=/var/run/fancontrol.lock
+SENSOR_CACHE_DIR=/var/run/fancontrol-sensors
+MODEM_CACHE_FILE=/var/run/at-webserver/chiptemp.status
+COOLING_PATH=""
+CPU_TEMP_FILES=""
+NVME_TEMP_FILES=""
+WIFI_CACHE_FILE=""
+TRUSTED_MODEM_CACHE_FILE=""
+LAST_STATE=""
+LAST_ERROR=""
+DEFAULT_CURVE='20:20,25:20,30:20,35:20,40:20,45:40,50:59,55:79,60:100,65:100,70:100,75:100,80:100,85:100,90:100,95:100,100:100,105:100,110:100'
+CONTROL_INTERVAL='1'
+WAIT_PID=""
+WAKE_PENDING=0
+DISCOVER_PENDING=1
+CONFIG_PENDING=1
+DISCOVER_COUNTDOWN=0
+TEMP_MIN_MC=-40000
+TEMP_MAX_MC=150000
+SENSOR_CACHE_TTL=15
+MODEM_CACHE_TTL=20
+CURRENT_UPTIME=""
+
+log_message()
+{
+    logger -t fancontrol "$*"
+}
+
+get_option()
+{
+    local value
+    value="$(uci -q get "${CONFIG}.${SECTION}.$1")"
+    [ -n "$value" ] && printf '%s\n' "$value" || printf '%s\n' "$2"
+}
+
+clamp()
+{
+    local value="$1"
+    [ "$value" -lt "$2" ] && value="$2"
+    [ "$value" -gt "$3" ] && value="$3"
+    printf '%s\n' "$value"
+}
+
+find_cooling_device()
+{
+    local device
+    set +f
+    for device in /sys/class/thermal/cooling_device*; do
+        [ -r "$device/type" ] || continue
+        [ "$(cat "$device/type" 2>/dev/null)" = "pwm-fan" ] || continue
+        [ -r "$device/max_state" ] || continue
+        [ -w "$device/cur_state" ] || continue
+        set -f
+        printf '%s\n' "$device"
+        return 0
+    done
+    set -f
+    return 1
+}
+
+wait_for_cooling_device()
+{
+    local attempt=0
+    while [ "$attempt" -lt 15 ]; do
+        COOLING_PATH="$(find_cooling_device)"
+        [ -n "$COOLING_PATH" ] && return 0
+        attempt=$((attempt + 1))
+        sleep 1
+    done
+    return 1
+}
+
+read_cpu_temperature()
+{
+    local input value highest=""
+
+    for input in $CPU_TEMP_FILES; do
+        value="$(cat "$input" 2>/dev/null)"
+        valid_temperature_mc "$value" || continue
+        if [ -z "$highest" ] || [ "$value" -gt "$highest" ]; then
+            highest="$value"
+        fi
+    done
+    [ -n "$highest" ] || return 1
+    printf '%s\n' "$highest"
+}
+
+valid_integer()
+{
+    local value="$1" digits
+    case "$value" in
+        -*) digits="${value#-}" ;;
+        *) digits="$value" ;;
+    esac
+    case "$digits" in ''|*[!0-9]*) return 1 ;; esac
+    return 0
+}
+
+valid_temperature_mc()
+{
+    valid_integer "$1" || return 1
+    [ "$1" -ge "$TEMP_MIN_MC" ] 2>/dev/null || return 1
+    [ "$1" -le "$TEMP_MAX_MC" ] 2>/dev/null || return 1
+    return 0
+}
+
+read_uptime_seconds()
+{
+    local value
+    value="$(cat /proc/uptime 2>/dev/null)"
+    value="${value%% *}"
+    value="${value%%.*}"
+    case "$value" in ''|*[!0-9]*) return 1 ;; esac
+    printf '%s\n' "$value"
+}
+
+read_cached_temperature()
+{
+    local file="$1" ttl="$2" line key value
+    local version="" temperature="" sample="" version_seen=0 temp_seen=0 sample_seen=0
+    local line_count=0 age
+
+    CACHE_STATE=missing
+    CACHE_VALUE=""
+    [ -n "$file" ] && [ -r "$file" ] || return 1
+
+    while IFS= read -r line || [ -n "$line" ]; do
+        line_count=$((line_count + 1))
+        case "$line" in
+            *=*) key="${line%%=*}"; value="${line#*=}" ;;
+            *) CACHE_STATE=error; return 1 ;;
+        esac
+        case "$key" in
+            version)
+                [ "$version_seen" -eq 0 ] || { CACHE_STATE=error; return 1; }
+                version="$value"
+                version_seen=1
+                ;;
+            temp_mc)
+                [ "$temp_seen" -eq 0 ] || { CACHE_STATE=error; return 1; }
+                temperature="$value"
+                temp_seen=1
+                ;;
+            sample_uptime)
+                [ "$sample_seen" -eq 0 ] || { CACHE_STATE=error; return 1; }
+                sample="$value"
+                sample_seen=1
+                ;;
+            *) CACHE_STATE=error; return 1 ;;
+        esac
+    done < "$file"
+
+    [ "$line_count" -eq 3 ] && [ "$version" = "1" ] || {
+        CACHE_STATE=error
+        return 1
+    }
+    valid_temperature_mc "$temperature" || {
+        CACHE_STATE=error
+        return 1
+    }
+    valid_integer "$sample" || {
+        CACHE_STATE=error
+        return 1
+    }
+    [ "$sample" -ge 0 ] 2>/dev/null || {
+        CACHE_STATE=error
+        return 1
+    }
+    [ -n "$CURRENT_UPTIME" ] || {
+        CACHE_STATE=error
+        return 1
+    }
+    [ "$CURRENT_UPTIME" -ge "$sample" ] 2>/dev/null || {
+        CACHE_STATE=stale
+        CACHE_VALUE="$temperature"
+        return 1
+    }
+    age=$((CURRENT_UPTIME - sample))
+    CACHE_VALUE="$temperature"
+    if [ "$age" -gt "$ttl" ]; then
+        CACHE_STATE=stale
+        return 1
+    fi
+
+    CACHE_STATE=ok
+    return 0
+}
+
+discover_nvme_temperature_files()
+{
+    local hwmon name input
+    NVME_TEMP_FILES=""
+
+    set +f
+    for hwmon in /sys/class/hwmon/hwmon*; do
+        [ -r "$hwmon/name" ] || continue
+        name="$(cat "$hwmon/name" 2>/dev/null)"
+        case "$name" in nvme|nvme_*) ;; *) continue ;; esac
+
+        for input in "$hwmon"/temp*_input; do
+            [ -r "$input" ] || continue
+            NVME_TEMP_FILES="${NVME_TEMP_FILES}${NVME_TEMP_FILES:+ }$input"
+        done
+    done
+    set -f
+}
+
+discover_cpu_temperature_files()
+{
+    local zone type
+    CPU_TEMP_FILES=""
+
+    set +f
+    for zone in /sys/class/thermal/thermal_zone*; do
+        [ -r "$zone/type" ] && [ -r "$zone/temp" ] || continue
+        type="$(cat "$zone/type" 2>/dev/null)"
+        case "$type" in
+            *cpu*|*CPU*|*soc*|*SOC*)
+                CPU_TEMP_FILES="${CPU_TEMP_FILES}${CPU_TEMP_FILES:+ }$zone/temp"
+                ;;
+        esac
+    done
+    set -f
+}
+
+trusted_cache_file()
+{
+    local file="$1" directory
+    directory="${file%/*}"
+    trusted_cache_path "$directory" d 0700 || return 1
+    trusted_cache_path "$file" f 0600 || return 1
+    printf '%s\n' "$file"
+}
+
+trusted_cache_path()
+{
+    local path="$1" kind="$2" permission="$3" found
+    [ -e "$path" ] && [ ! -L "$path" ] || return 1
+    found="$(find "$path" -xdev -maxdepth 0 -type "$kind" \
+        -user 0 -group 0 -perm "$permission" -print 2>/dev/null)"
+    [ "$found" = "$path" ]
+}
+
+discover_cache_files()
+{
+    WIFI_CACHE_FILE="$(trusted_cache_file "$SENSOR_CACHE_DIR/wifi.status")"
+    TRUSTED_MODEM_CACHE_FILE="$(trusted_cache_file "$MODEM_CACHE_FILE")"
+}
+
+load_runtime_config()
+{
+    enabled="$(get_option enable 1)"
+    curve="$(get_option curve "$DEFAULT_CURVE")"
+    if raw_temp_sources="$(uci -q get "${CONFIG}.${SECTION}.temp_sources")"; then
+        normalize_selected_sources "$raw_temp_sources" || true
+    else
+        SELECTED_SOURCES=cpu
+        SELECTED_SOURCES_VALID=1
+    fi
+}
+
+read_nvme_temperature()
+{
+    local input value highest=""
+    for input in $NVME_TEMP_FILES; do
+        value="$(cat "$input" 2>/dev/null)"
+        valid_temperature_mc "$value" || continue
+        if [ -z "$highest" ] || [ "$value" -gt "$highest" ]; then
+            highest="$value"
+        fi
+    done
+    [ -n "$highest" ] || return 1
+    printf '%s\n' "$highest"
+}
+
+normalize_selected_sources()
+{
+    local raw="$1" source token normalized=""
+    SELECTED_SOURCES_VALID=1
+    [ -n "$raw" ] || {
+        SELECTED_SOURCES=""
+        SELECTED_SOURCES_VALID=0
+        return 1
+    }
+
+    for token in $raw; do
+        case "$token" in
+            cpu|wifi|modem|nvme) ;;
+            *) SELECTED_SOURCES_VALID=0 ;;
+        esac
+    done
+    for source in cpu wifi modem nvme; do
+        case " $raw " in
+            *" $source "*) normalized="$source"; break ;;
+        esac
+    done
+    SELECTED_SOURCES="$normalized"
+    [ -n "$SELECTED_SOURCES" ] || SELECTED_SOURCES_VALID=0
+    [ "$SELECTED_SOURCES_VALID" = "1" ]
+}
+
+refresh_source_readings()
+{
+    CURRENT_UPTIME="$(read_uptime_seconds)" || CURRENT_UPTIME=""
+    SOURCE_CPU_TEMP="$(read_cpu_temperature)"
+    if valid_temperature_mc "$SOURCE_CPU_TEMP"; then
+        SOURCE_CPU_STATE=ok
+    else
+        SOURCE_CPU_TEMP=""
+        SOURCE_CPU_STATE=missing
+    fi
+
+    if [ -z "$WIFI_CACHE_FILE" ]; then
+        WIFI_CACHE_FILE="$(trusted_cache_file "$SENSOR_CACHE_DIR/wifi.status")"
+    fi
+    read_cached_temperature "$WIFI_CACHE_FILE" "$SENSOR_CACHE_TTL" || true
+    SOURCE_WIFI_TEMP="$CACHE_VALUE"
+    SOURCE_WIFI_STATE="$CACHE_STATE"
+
+    if [ -z "$TRUSTED_MODEM_CACHE_FILE" ]; then
+        TRUSTED_MODEM_CACHE_FILE="$(trusted_cache_file "$MODEM_CACHE_FILE")"
+    fi
+    read_cached_temperature "$TRUSTED_MODEM_CACHE_FILE" "$MODEM_CACHE_TTL" || true
+    SOURCE_MODEM_TEMP="$CACHE_VALUE"
+    SOURCE_MODEM_STATE="$CACHE_STATE"
+
+    SOURCE_NVME_TEMP="$(read_nvme_temperature)"
+    if valid_temperature_mc "$SOURCE_NVME_TEMP"; then
+        SOURCE_NVME_STATE=ok
+    else
+        SOURCE_NVME_TEMP=""
+        SOURCE_NVME_STATE=missing
+    fi
+}
+
+select_control_temperature()
+{
+    local source source_temp source_state
+    CONTROL_TEMPERATURE_MC=""
+    CONTROL_SOURCE=""
+
+    for source in cpu wifi modem nvme; do
+        case " $SELECTED_SOURCES " in *" $source "*) ;; *) continue ;; esac
+        case "$source" in
+            cpu) source_temp="$SOURCE_CPU_TEMP"; source_state="$SOURCE_CPU_STATE" ;;
+            wifi) source_temp="$SOURCE_WIFI_TEMP"; source_state="$SOURCE_WIFI_STATE" ;;
+            modem) source_temp="$SOURCE_MODEM_TEMP"; source_state="$SOURCE_MODEM_STATE" ;;
+            nvme) source_temp="$SOURCE_NVME_TEMP"; source_state="$SOURCE_NVME_STATE" ;;
+        esac
+        [ "$source_state" = "ok" ] || continue
+        valid_temperature_mc "$source_temp" || continue
+        if [ -z "$CONTROL_TEMPERATURE_MC" ] || [ "$source_temp" -gt "$CONTROL_TEMPERATURE_MC" ]; then
+            CONTROL_TEMPERATURE_MC="$source_temp"
+            CONTROL_SOURCE="$source"
+        fi
+    done
+
+    [ -n "$CONTROL_TEMPERATURE_MC" ]
+}
+
+curve_speed()
+{
+    local curve="$1"
+    local target="$2"
+    local old_ifs point point_temp point_speed
+    local previous_temp="" previous_speed="" result
+
+    old_ifs="$IFS"
+    IFS=','
+    set -- $curve
+    IFS="$old_ifs"
+
+    for point in "$@"; do
+        point_temp="${point%%:*}"
+        point_speed="${point#*:}"
+        case "$point_temp:$point_speed" in
+            *[!0-9:]*) continue ;;
+        esac
+
+        point_speed="$(clamp "$point_speed" 0 100)"
+        if [ -z "$previous_temp" ]; then
+            if [ "$target" -le "$point_temp" ]; then
+                printf '%s\n' "$point_speed"
+                return 0
+            fi
+        elif [ "$target" -le "$point_temp" ]; then
+            if [ "$point_temp" -eq "$previous_temp" ]; then
+                result="$point_speed"
+            else
+                result=$((previous_speed + (target - previous_temp) * (point_speed - previous_speed) / (point_temp - previous_temp)))
+            fi
+            clamp "$result" 0 100
+            return 0
+        fi
+
+        previous_temp="$point_temp"
+        previous_speed="$point_speed"
+    done
+
+    [ -n "$previous_speed" ] && printf '%s\n' "$previous_speed" || printf '100\n'
+}
+
+set_fan_percent()
+{
+    local percent max_state state observed
+    percent="$(clamp "$1" 0 100)"
+    printf '%s\n' "$percent" > "$SPEED_FILE"
+    max_state="$(cat "$COOLING_PATH/max_state" 2>/dev/null)"
+    case "$max_state" in ''|*[!0-9]*|0) return 1 ;; esac
+
+    # BPI-R3 Mini's pwm-fan cooling states are electrically reversed:
+    # state 0 is full speed and max_state is stopped.  Keep the UI/API in the
+    # conventional direction, where 0% is stopped and 100% is full speed.
+    state=$(((max_state + 1) - ((percent * (max_state + 1) + 50) / 100)))
+    [ "$state" -lt 0 ] && state=0
+    [ "$state" -gt "$max_state" ] && state="$max_state"
+    observed="$(cat "$COOLING_PATH/cur_state" 2>/dev/null)"
+    if [ "$state" != "$observed" ]; then
+        if ! printf '%s\n' "$state" > "$COOLING_PATH/cur_state" 2>/dev/null; then
+            observed="$(cat "$COOLING_PATH/cur_state" 2>/dev/null)"
+            [ "$observed" = "$state" ] || return 1
+        fi
+        LAST_STATE="$state"
+    fi
+    return 0
+}
+
+write_status()
+{
+    local temporary="${STATUS_FILE}.$$" control_source="$CONTROL_SOURCE"
+    local cpu_temp="$SOURCE_CPU_TEMP"
+    local wifi_temp="$SOURCE_WIFI_TEMP" modem_temp="$SOURCE_MODEM_TEMP"
+    local nvme_temp="$SOURCE_NVME_TEMP"
+    [ -n "$control_source" ] || control_source='--'
+    [ -n "$cpu_temp" ] || cpu_temp='--'
+    [ -n "$wifi_temp" ] || wifi_temp='--'
+    [ -n "$modem_temp" ] || modem_temp='--'
+    [ -n "$nvme_temp" ] || nvme_temp='--'
+    umask 077
+    {
+        printf 'temperature=%s\n' "$1"
+        printf 'speed=%s\n' "$2"
+        printf 'state=%s\n' "$3"
+        printf 'error=%s\n' "$4"
+        printf 'sample_uptime=%s\n' "$CURRENT_UPTIME"
+        printf 'control_source=%s\n' "$control_source"
+        printf 'selected_sources=%s\n' "$SELECTED_SOURCES"
+        printf 'source_cpu_temp=%s\n' "$cpu_temp"
+        printf 'source_cpu_state=%s\n' "$SOURCE_CPU_STATE"
+        printf 'source_wifi_temp=%s\n' "$wifi_temp"
+        printf 'source_wifi_state=%s\n' "$SOURCE_WIFI_STATE"
+        printf 'source_modem_temp=%s\n' "$modem_temp"
+        printf 'source_modem_state=%s\n' "$SOURCE_MODEM_STATE"
+        printf 'source_nvme_temp=%s\n' "$nvme_temp"
+        printf 'source_nvme_state=%s\n' "$SOURCE_NVME_STATE"
+    } > "$temporary"
+    mv "$temporary" "$STATUS_FILE"
+}
+
+set_failsafe_full_speed()
+{
+    local result=1
+    COOLING_PATH="$(find_cooling_device)"
+    if [ -n "$COOLING_PATH" ]; then
+        LAST_STATE=""
+        # Leaving the controller must never leave this board with a stopped
+        # fan.  On BPI-R3 Mini, UI 100% maps to cooling state 0 (full speed).
+        set_fan_percent 100 >/dev/null 2>&1 && result=0
+    fi
+    printf '100\n' > "$SPEED_FILE"
+    return "$result"
+}
+
+turn_fan_off()
+{
+    COOLING_PATH="$(find_cooling_device)"
+    if [ -z "$COOLING_PATH" ]; then
+        printf '0\n' > "$SPEED_FILE"
+        return 1
+    fi
+
+    LAST_STATE=""
+    set_fan_percent 0
+}
+
+stop_control_wait()
+{
+    local key value rest
+    [ -n "$WAIT_PID" ] || return 0
+
+    # A completed sleep PID may be reused between wait returning and this trap.
+    # Only signal the process while procfs still proves it is our direct child.
+    [ -r "/proc/$WAIT_PID/status" ] || return 0
+    while read -r key value rest; do
+        [ "$key" = "PPid:" ] || continue
+        [ "$value" = "$$" ] || return 0
+        kill "$WAIT_PID" 2>/dev/null || true
+        return 0
+    done < "/proc/$WAIT_PID/status"
+    return 0
+}
+
+request_control_cycle()
+{
+    WAKE_PENDING=1
+    DISCOVER_PENDING=1
+    CONFIG_PENDING=1
+    stop_control_wait
+}
+
+controller_pid_matches()
+{
+    local candidate="$1"
+    case "$candidate" in ''|*[!0-9]*) return 1 ;; esac
+    [ "$candidate" -ge 2 ] 2>/dev/null || return 1
+    [ -r "/proc/$candidate/cmdline" ] || return 1
+    tr '\000' '\n' < "/proc/$candidate/cmdline" 2>/dev/null |
+        grep -F -x -q '/usr/bin/fancontrol'
+}
+
+controller_lock_is_live()
+{
+    local pid_owner
+    [ -x /usr/bin/flock ] || return 1
+    pid_owner="$(cat "$PID_FILE" 2>/dev/null)"
+    controller_pid_matches "$pid_owner" || return 1
+    [ -r "$LOCK_FILE" ] || return 1
+    exec 8<"$LOCK_FILE" || return 1
+    if /usr/bin/flock -n 8; then
+        exec 8>&-
+        return 1
+    fi
+    exec 8>&-
+    return 0
+}
+
+acquire_controller_lock()
+{
+    [ -x /usr/bin/flock ] || return 1
+    exec 9>"$LOCK_FILE" || return 1
+    if ! /usr/bin/flock -n 9; then
+        exec 9>&-
+        return 2
+    fi
+    if ! printf '%s\n' "$$" > "$PID_FILE"; then
+        exec 9>&-
+        return 1
+    fi
+    return 0
+}
+
+cleanup()
+{
+    local owner
+    stop_control_wait
+    # Any daemon exit is a fault/service-stop boundary and remains fail-safe.
+    # WebUI enable=0 does not stop the daemon; the live loop holds 0% instead.
+    set_failsafe_full_speed
+    owner="$(cat "$PID_FILE" 2>/dev/null)"
+    [ "$owner" = "$$" ] && rm -f "$PID_FILE"
+}
+
+usage()
+{
+    printf 'Usage: %s [--check|--off|--stop]\n' "$0" >&2
+}
+
+case "${1-}" in
+    '')
+        [ "$#" -eq 0 ] || { usage; exit 2; }
+        ;;
+    --check)
+        [ "$#" -eq 1 ] || { usage; exit 2; }
+        if controller_lock_is_live; then
+            printf '%s\n' 'fancontrol controller is running'
+            exit 0
+        fi
+        printf '%s\n' 'fancontrol controller is not running' >&2
+        exit 1
+        ;;
+    --off|--stop)
+        [ "$#" -eq 1 ] || { usage; exit 2; }
+        ;;
+    *)
+        usage
+        exit 2
+        ;;
+esac
+
+if [ "${1-}" = "--off" ]; then
+    if turn_fan_off; then
+        exit 0
+    fi
+    set_failsafe_full_speed
+    exit 1
+fi
+
+if [ "${1-}" = "--stop" ]; then
+    set_failsafe_full_speed
+    exit 0
+fi
+
+acquire_controller_lock
+lock_status=$?
+case "$lock_status" in
+    0) ;;
+    2)
+        log_message 'fancontrol controller is already running'
+        exit 1
+        ;;
+    *)
+        log_message 'fancontrol controller lock acquisition failed'
+        set_failsafe_full_speed
+        exit 1
+        ;;
+esac
+
+trap 'exit 0' INT TERM
+# A successful durable UCI commit uses HUP only to interrupt the one-second
+# sleep and start the next control cycle immediately. It must never run
+# cleanup(), which leaves the fan at the fail-safe full speed.
+trap 'request_control_cycle' HUP
+trap cleanup EXIT
+
+if ! wait_for_cooling_device; then
+    log_message "未找到BPI-R3 Mini pwm-fan控制接口"
+    exit 1
+fi
+
+log_message "BPI-R3 Mini风扇控制已启动：${COOLING_PATH}"
+
+while true; do
+    if [ "$DISCOVER_PENDING" = "1" ] || [ "$DISCOVER_COUNTDOWN" -le 0 ]; then
+        discover_cpu_temperature_files
+        discover_nvme_temperature_files
+        discover_cache_files
+        DISCOVER_PENDING=0
+        DISCOVER_COUNTDOWN=30
+    fi
+    DISCOVER_COUNTDOWN=$((DISCOVER_COUNTDOWN - 1))
+
+    if [ "$CONFIG_PENDING" = "1" ]; then
+        load_runtime_config
+        CONFIG_PENDING=0
+    fi
+    refresh_source_readings
+    error=""
+
+    if [ "$SELECTED_SOURCES_VALID" = "1" ] && select_control_temperature; then
+        temperature_mc="$CONTROL_TEMPERATURE_MC"
+        temperature=$(((temperature_mc + 500) / 1000))
+        speed="$(curve_speed "$curve" "$temperature")"
+    elif [ "$SELECTED_SOURCES_VALID" != "1" ]; then
+        temperature_mc=0
+        CONTROL_SOURCE=""
+        speed=100
+        error="温度来源配置无效，已使用全速保护"
+    else
+        temperature_mc=0
+        speed=100
+        error="所选温度来源全部不可用，已使用全速保护"
+    fi
+
+    # Only the exact persisted value 0 is an intentional fan shutdown. Broken
+    # or unexpected values must never be interpreted as permission to stop.
+    case "$enabled" in
+        0)
+            speed=0
+            if [ "$SELECTED_SOURCES_VALID" != "1" ]; then
+                error="温度来源配置无效；风扇已按用户设置关闭"
+            elif [ -z "$CONTROL_SOURCE" ]; then
+                error="所选温度来源全部不可用；风扇已按用户设置关闭"
+            fi
+            ;;
+        1) ;;
+        *)
+            speed=100
+            error="风扇控制开关配置无效，已使用全速保护"
+            ;;
+    esac
+    speed="$(clamp "$speed" 0 100)"
+
+    if ! set_fan_percent "$speed"; then
+        speed=100
+        if set_failsafe_full_speed; then
+            error="pwm-fan目标状态写入失败，已切换全速保护"
+        else
+            error="pwm-fan状态写入失败，全速保护写入也未确认"
+        fi
+        state="$(cat "$COOLING_PATH/cur_state" 2>/dev/null)"
+        write_status "$temperature_mc" "$speed" "$state" "$error"
+        log_message "$error"
+        LAST_ERROR="$error"
+        # Let procd restart the controller after the status snapshot is
+        # published.  The EXIT trap retries the full-speed fail-safe.
+        exit 1
+    fi
+
+    state="$(cat "$COOLING_PATH/cur_state" 2>/dev/null)"
+    write_status "$temperature_mc" "$speed" "$state" "$error"
+
+    if [ "$error" != "$LAST_ERROR" ]; then
+        [ -n "$error" ] && log_message "$error"
+        LAST_ERROR="$error"
+    fi
+
+    if [ "$WAKE_PENDING" = "1" ]; then
+        WAKE_PENDING=0
+        continue
+    fi
+
+    sleep "$CONTROL_INTERVAL" 9>&- &
+    WAIT_PID=$!
+    case "$WAIT_PID" in
+        ''|*[!0-9]*)
+            log_message "风扇控制等待进程启动失败，已进入全速保护"
+            exit 1
+            ;;
+    esac
+    if [ "$WAKE_PENDING" = "1" ]; then
+        stop_control_wait
+    fi
+    wait "$WAIT_PID" 2>/dev/null
+    wait_status=$?
+    if [ "$WAKE_PENDING" = "1" ]; then
+        stop_control_wait
+        wait "$WAIT_PID" 2>/dev/null || true
+        WAIT_PID=""
+        WAKE_PENDING=0
+        continue
+    fi
+    WAIT_PID=""
+    if [ "$wait_status" -ne 0 ]; then
+        log_message "风扇控制等待异常，已进入全速保护"
+        exit 1
+    fi
+done

@@ -1,0 +1,24 @@
+#!/bin/sh
+
+. /lib/functions.sh
+. /lib/functions/leds.sh
+. /lib/functions/uci-defaults.sh
+
+board=$(board_name)
+
+board_config_update
+
+case $board in
+xiaomi,redmi-router-ax6000*)
+	ucidef_set_led_default "status" "status" "rgb:status" "1"
+	ucidef_set_led_netdev "wan" "wan" "rgb:network" "wan"
+	;;
+bananapi,bpi-r3mini-emmc)
+    ucidef_set_led_netdev "WLAN2G" "WLAN2G" "r3mini:blue1" "ra0"
+    ucidef_set_led_netdev "WLAN5G" "WLAN5G" "r3mini:blue2" "rax0"
+ 	;;
+esac
+
+board_config_flush
+
+exit 0

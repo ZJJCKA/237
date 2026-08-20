@@ -1,0 +1,359 @@
+diff --git a/mcu/warp_ccif.c b/mcu/warp_ccif.c
+index 497c7950b1be9ebd50b59a08596c0a227faa2cf1..a6baafe2b0a4ed7eae20c4297e52e57718a4bc52 100644
+--- a/mcu/warp_ccif.c
++++ b/mcu/warp_ccif.c
+@@ -150,7 +150,7 @@ static void ccif_exit(struct woif_bus *bus)
+ 		disable_irq(ccif->irq);
+ 		free_irq(ccif->irq, bus);
+ 		if (ccif->base_addr)
+-			iounmap(ccif->base_addr);
++			iounmap((void __iomem *)ccif->base_addr);
+ 		warp_os_free_mem(ccif);
+ 	}
+ 
+diff --git a/mcu/warp_fwdl.c b/mcu/warp_fwdl.c
+index 1de1a1ff0deb1fded5d7c4f7e6c70d70ad007c5b..3a4c5e672243ce1159fc59d2e08031a91714e47b 100644
+--- a/mcu/warp_fwdl.c
++++ b/mcu/warp_fwdl.c
+@@ -202,7 +202,7 @@ static int warp_fw_init(struct warp_entry *warp)
+ 		goto err_out;
+ #endif	/* CONFIG_WARP_WO_EMBEDDED_LOAD */
+ 	} else {
+-		ctrl->bin_ptr = ctrl->fw_entry->data;
++		ctrl->bin_ptr = (u8 *)ctrl->fw_entry->data;
+ 		ctrl->bin_size = ctrl->fw_entry->size;
+ 		ctrl->bin_mode = WO_FW_BIN;
+ 		ret = 0;
+@@ -319,9 +319,10 @@ static int warp_fwdl_mcu_mode(struct warp_fwdl_ctrl *ctrl, struct wed_entry *wed
+ 		warp_fwdl_write_start_address(ctrl, ctrl->region[0].base_addr_pa, wed_idx);
+ 		warp_fwdl_reset(ctrl, 1, wed_idx);
+ 
+-#ifndef CONFIG_WARP_WO_EMBEDDED_LOAD
+-		release_firmware(ctrl->fw_entry);
+-#endif	/* CONFIG_WARP_WO_EMBEDDED_LOAD */
++		if (ctrl->bin_mode == WO_FW_BIN && ctrl->fw_entry) {
++			release_firmware(ctrl->fw_entry);
++			ctrl->fw_entry = NULL;
++		}
+ 	} else
+ 		warp_dbg(WARP_DBG_ERR, "[%s]Prepare firmware failed!\n", __func__);
+ 
+diff --git a/mcu/warp_msg.c b/mcu/warp_msg.c
+index db453693255a48cfc0301561d4a24c8950ac0fa4..25b86d4c96e879aa8ed74920a07f1afb71f14fff 100644
+--- a/mcu/warp_msg.c
++++ b/mcu/warp_msg.c
+@@ -205,9 +205,10 @@ static int warp_msg_process(void *data)
+ 	while (1) {
+ 		ret = warp_msg_receive(ctrl->module_id, ctrl->wed_idx, &msg_ins);
+ 		if (ret != 0) {
+-			warp_dbg(WARP_DBG_OFF,
+-				 "%s(): module id(%d), wed_idx(%d), something wrong(ret = %d)\n",
+-				 __func__, ctrl->module_id, ctrl->wed_idx, ret);
++			if (!kthread_should_stop())
++				warp_dbg(WARP_DBG_ERR,
++					 "%s(): module id(%d), wed_idx(%d), receive failed(ret = %d)\n",
++					 __func__, ctrl->module_id, ctrl->wed_idx, ret);
+ 			break;
+ 		}
+ 
+@@ -843,4 +844,3 @@ end:
+ }
+ EXPORT_SYMBOL(warp_msg_send_cmd);
+ 
+-
+diff --git a/mcu/warp_wo.c b/mcu/warp_wo.c
+index 1d293e18a1f982ea889cfc47b7d7764833531ffe..7891e92c0b8e1da396cfa840acaa6d48e1ce4551 100644
+--- a/mcu/warp_wo.c
++++ b/mcu/warp_wo.c
+@@ -466,7 +466,8 @@ static void bus_rx_task(unsigned long data)
+ 				rx_ctrl->dbg_ddone_check = 0;
+ 			}
+ 			} else {
+-				warp_dbg(WARP_DBG_ERR, "wriong ddone bit 0x%x: %d ", cidx, (rxd->ctrl & WED_CTL_DMA_DONE));
++				warp_dbg(WARP_DBG_ERR, "wrong ddone bit 0x%x: 0x%lx ", cidx,
++					(rxd->ctrl & WED_CTL_DMA_DONE));
+ 			}
+ 		}
+ 
+diff --git a/mcu/warp_woctrl.c b/mcu/warp_woctrl.c
+index b80f89297b04acb8ffeabcced58edd0bb4f5fef0..5fb15893e37b0510d1a10d97ceb5c376d02f9739 100644
+--- a/mcu/warp_woctrl.c
++++ b/mcu/warp_woctrl.c
+@@ -18,11 +18,8 @@
+ #include "warp_hw.h"
+ #include "warp_woif.h"
+ #include <linux/device.h>
+-#include <linux/reset.h>
+ 
+ #ifdef CONFIG_WED_HW_RRO_SUPPORT
+-#define WOCPU_DLM_DEV_NODE "mediatek,wocpu_dlm"
+-
+ static char *warp_woctrl_state_to_string(u8 state)
+ {
+ 	switch (state) {
+@@ -224,45 +221,6 @@ static void warp_woctrl_wakeup_wo(struct warp_entry *warp, u8 state)
+ #endif /* (WED_HWRRO_MODE == WED_HWRRO_MODE_WOCPU) */
+ }
+ 
+-static int warp_woctrl_reset_wocpu(struct warp_entry *warp)
+-{
+-	int ret;
+-	struct device_node *node = of_find_compatible_node(NULL, NULL, WOCPU_DLM_DEV_NODE);
+-	struct reset_control *rst_warp = of_reset_control_get(node, "wocpu_rst");
+-
+-	if (IS_ERR(rst_warp)) {
+-		warp_dbg(WARP_DBG_OFF, "%s(): can't get reset control, rst_warp=%ld\n",
+-			__func__, PTR_ERR(rst_warp));
+-		return WARP_FAIL_STATUS;
+-	}
+-
+-	ret = reset_control_assert(rst_warp);
+-	if (ret) {
+-		warp_dbg(WARP_DBG_OFF, "%s(): unable to assert, ret:%d\n", __func__, ret);
+-		return WARP_FAIL_STATUS;
+-	}
+-
+-	warp_dbg(WARP_DBG_OFF, "%s(): wait for wocpu assert\n", __func__);
+-
+-	do {
+-		ret = reset_control_status(rst_warp);
+-	} while (ret <= 0);
+-
+-	warp_dbg(WARP_DBG_OFF, "%s(): wocpu is assert\n", __func__);
+-
+-	ret = reset_control_deassert(rst_warp);
+-
+-	if (ret) {
+-		warp_dbg(WARP_DBG_OFF, "%s(): unable to deassert, ret:%d\n", __func__, ret);
+-		return WARP_FAIL_STATUS;
+-	}
+-
+-	/* clear fwdl parameter */
+-	warp_fwdl_clear(warp);
+-
+-	return WARP_OK_STATUS;
+-}
+-
+ static int warp_woctrl_enter_disable_state(struct warp_entry *warp)
+ {
+ 	struct warp_wo_ctrl *wo_ctrl = &warp->woif.wo_ctrl;
+diff --git a/regs/reg_v2/warp_hw_v2.c b/regs/reg_v2/warp_hw_v2.c
+index 3161a8a4faf842ab0da9cdbe950eeb61eb2cd66f..11c7eac52aa3393fe276e67c79086b08824e8257 100644
+--- a/regs/reg_v2/warp_hw_v2.c
++++ b/regs/reg_v2/warp_hw_v2.c
+@@ -1569,6 +1569,7 @@ reset_rx_d_traffic(struct wed_entry *wed, u32 reset_type)
+ 	struct wdma_entry *wdma;
+ 	struct wed_ser_ctrl *ser_ctrl;
+ 	struct wed_ser_moudle_busy_cnt *busy_cnt;
++	int ret = 0;
+ 
+ 	if (wed == NULL || wed->warp == NULL)
+ 		return -1;
+@@ -1578,8 +1579,6 @@ reset_rx_d_traffic(struct wed_entry *wed, u32 reset_type)
+ 	warp = wed->warp;
+ 	wdma = &warp->wdma;
+ 
+-	int ret = 0;
+-
+ 	/* WOCPU Enter SER */
+ 	warp_woctrl_enter_state((struct warp_entry *)wed->warp, WO_STATE_SER_RESET);
+ 	warp_dbg(WARP_DBG_INF, "%s(): WOCPU Enter SER\n", __func__);
+@@ -3050,14 +3049,14 @@ warp_reset_hw(struct wed_entry *wed, u32 reset_type)
+ 
+ 		if (ret < 0) {
+ 			warp_dbg(WARP_DBG_ERR, "%s(): wed_tx reset check fail,ret=%d\n", __func__, ret);
+-			warp_dbg(WARP_DBG_ERR, "%s(): check ser_busy_cnt: echo 18 > wed\n", __func__, ret);
++			warp_dbg(WARP_DBG_ERR, "%s(): check ser_busy_cnt: echo 18 > wed\n", __func__);
+ 		}
+ 		/* TX free done reset - rx path */
+ 		ret = reset_rx_traffic(wed, reset_type);
+ 
+ 		if (ret < 0) {
+ 			warp_dbg(WARP_DBG_ERR, "%s(): wed_rx reset check fail,ret=%d\n", __func__, ret);
+-			warp_dbg(WARP_DBG_ERR, "%s(): check ser_busy_cnt: echo 18 > wed\n", __func__, ret);
++			warp_dbg(WARP_DBG_ERR, "%s(): check ser_busy_cnt: echo 18 > wed\n", __func__);
+ 		}
+ 
+ #ifdef WED_RX_D_SUPPORT
+@@ -3066,7 +3065,7 @@ warp_reset_hw(struct wed_entry *wed, u32 reset_type)
+ 
+ 		if (ret < 0) {
+ 			warp_dbg(WARP_DBG_ERR, "%s(): wed_rx_data check fail,ret=%d\n", __func__, ret);
+-			warp_dbg(WARP_DBG_ERR, "%s(): check ser_busy_cnt: echo 18 > wed\n", __func__, ret);
++			warp_dbg(WARP_DBG_ERR, "%s(): check ser_busy_cnt: echo 18 > wed\n", __func__);
+ 		}
+ #endif
+ 
+diff --git a/warp_bm_v2.c b/warp_bm_v2.c
+index 1413a4619c623646a03c7324c42f0ccd12e335a4..0982d63cfa0d8a87e008c89a23a1c32000d430fd 100644
+--- a/warp_bm_v2.c
++++ b/warp_bm_v2.c
+@@ -85,19 +85,6 @@ dump_pkt_info(struct wed_buf_res *res)
+ #endif	/* WED_DYNAMIC_TXBM_SUPPORT */
+ }
+ 
+-/*
+-*
+-*/
+-static void
+-grp_buf_exit(
+-	struct wed_entry *wed,
+-	struct wed_buf_res *res,
+-	u32 start,
+-	u32 size)
+-
+-{
+-}
+-
+ /*
+ *
+ */
+@@ -669,7 +656,6 @@ buf_alloc_task(unsigned long data)
+ 		res->dybm_stat.off_low_buf_int = true;
+ 		warp_dbg(WARP_DBG_INF, "%s(): buf_low chage to %d!, disable interrupt\n", __func__, value);
+ 	}
+-done:
+ 	if (res->dybm_stat.off_low_buf_int == true)
+ 		dybm_eint_ctrl(wed, false, WARP_DYBM_EINT_BM_L);
+ 	else
+@@ -1165,7 +1151,4 @@ wed_rx_budget_ring_exit(
+ {
+-	struct wed_res_ctrl *res_ctrl = &wed->res_ctrl;
+-	struct wed_rx_ctrl *rx_ctrl = &res_ctrl->rx_ctrl;
+-	struct wed_rx_bm_res *extra_res = &rx_ctrl->extra;
+ 	u32 i;
+ 
+ 	for (i = 0; i < ring_len; i++)
+@@ -1218,7 +1201,7 @@ wed_rx_budget_ring_init(
+ 					desc->alloc_va,
+ 					desc->alloc_size, DMA_TO_DEVICE);
+ 	if (dma_mapping_error(&wed->pdev->dev, desc->alloc_pa)) {
+-		warp_dbg(WARP_DBG_ERR, "%s(): FATAL, DMA map ERROR, %ld\n", __func__, desc->alloc_va);
++		warp_dbg(WARP_DBG_ERR, "%s(): FATAL, DMA map ERROR, %p\n", __func__, desc->alloc_va);
+ 		warp_os_free_mem(res->desc[idx].alloc_va);
+ 		ret = -1;
+ 		goto err;
+@@ -1919,4 +1902,3 @@ err:
+ 	wed_rx_bm_exit(wed);
+ 	return ret;
+ }
+-
+diff --git a/warp_main.c b/warp_main.c
+index 1323382c96f50f53a3e5c8faf85cd008f3bd4716..9fcbf07cc1d4f4b2768430eb149dd8aeef7f8d5a 100644
+--- a/warp_main.c
++++ b/warp_main.c
+@@ -189,8 +189,9 @@ static void
+ warp_entry_release(struct warp_entry *warp)
+ {
+ 	struct wifi_entry *wifi;
+-	wifi = &warp->wifi;
+ 	u8 enable = 0;
++
++	wifi = &warp->wifi;
+ 	/* wbsys irq return*/
+ 	wifi->ops->swap_irq(wifi->hw.priv, warp->wifi.hw.irq);
+ 	warp_bus_msi_set(warp->idx, &enable);
+@@ -442,11 +443,11 @@ warp_probe(struct platform_device *pdev)
+ 		warp_fwdl_get_wo_heartbeat(&warp->woif.fwdl_ctrl, &heart_beat, warp->idx);
+ 		warp_dbg(WARP_DBG_ERR, "%s()wo heartbeat: 0x%x!\n", __func__, heart_beat);
+ 		/* dump WO PC LR log for 2 times*/
+-		warp_dbg(WARP_DBG_ERR, "%s()======WO PC LR dump======\n", __func__, heart_beat);
++		warp_dbg(WARP_DBG_ERR, "%s()======WO PC LR dump======\n", __func__);
+ 		for (i = 0; i < 2; i++) {
+ 			warp_wo_pc_lr_cr_dump(warp->idx);
+ 		}
+-		warp_dbg(WARP_DBG_ERR, "%s()======WO PC LR dump======\n", __func__, heart_beat);
++		warp_dbg(WARP_DBG_ERR, "%s()======WO PC LR dump======\n", __func__);
+ 	}
+ 	warp_dbg(WARP_DBG_INF, "%s(): platform device probe is done\n", __func__);
+ 	return 0;
+@@ -1238,8 +1239,6 @@ warp_isr_handler(void *priv_data)
+ 		return;
+ 
+ 	wed = &warp->wed;
+-	struct wifi_entry *wifi = &warp->wifi;
+-	struct wifi_hw *hw = &wifi->hw;
+ 
+ 	warp_eint_ctrl_hw(wed, false);
+ 	warp_eint_get_stat_hw(wed, &status);
+@@ -1526,11 +1525,11 @@ warp_gen4m_resume_sub(struct warp_entry *warp)
+ 		warp_fwdl_get_wo_heartbeat(&warp->woif.fwdl_ctrl, &heart_beat, warp->idx);
+ 		warp_dbg(WARP_DBG_ERR, "%s()wo heartbeat: 0x%x!\n", __func__, heart_beat);
+ 		/* dump WO PC LR log for 2 times*/
+-		warp_dbg(WARP_DBG_ERR, "%s()======WO PC LR dump======\n", __func__, heart_beat);
++		warp_dbg(WARP_DBG_ERR, "%s()======WO PC LR dump======\n", __func__);
+ 		for (i = 0; i < 2; i++) {
+ 			warp_wo_pc_lr_cr_dump(warp->idx);
+ 		}
+-		warp_dbg(WARP_DBG_ERR, "%s()======WO PC LR dump======\n", __func__, heart_beat);
++		warp_dbg(WARP_DBG_ERR, "%s()======WO PC LR dump======\n", __func__);
+ 	}
+ 
+ 	return 0;
+@@ -1763,5 +1762,3 @@ module_exit(warp_module_exit);
+ 
+ MODULE_LICENSE("GPL");
+ MODULE_DESCRIPTION(DRIVER_DESC);
+-MODULE_SUPPORTED_DEVICE("mt7615 within mt7622");
+-
+diff --git a/warp_wifi.c b/warp_wifi.c
+index 2415f0aff71ec43bec4708985f2c351e0aa5a417..3b34bca65c08e2520c7a6c02697aa95480e3e673 100644
+--- a/warp_wifi.c
++++ b/warp_wifi.c
+@@ -85,10 +85,6 @@ void wifi_dump_skb(
+ }
+ #endif /*CONFIG_WARP_DBG_SUPPORT*/
+ 
+-#define FOE_MAGIC_WED0 0x78
+-#define FOE_MAGIC_WED1 0x79
+-#define FOE_MAGIC_WED2 0x87
+-
+ void
+ wifi_rx_tuple_add(struct wifi_entry *wifi, u8 idx, unsigned char *rx_info)
+ {
+diff --git a/wed.c b/wed.c
+index 0b834388f5be90a908457d39b2e089f28c7bd7f4..febf02638acbb080121385b8f89c5e6a70c33412 100644
+--- a/wed.c
++++ b/wed.c
+@@ -565,26 +565,10 @@ int wed_release_rx_token(
+ 	u32 token_id)
+ {
+ 	int ret = -1;
+-	struct warp_entry *warp = NULL;
+-	struct wifi_entry *wifi = NULL;
+-	struct wifi_ops *ops = NULL;
+-
+-	if (wed) {
+-		warp = (struct warp_entry *)wed->warp;
+-#if 0
+-		if (warp) {
+-			wifi = &warp->wifi;
+-			ops = wifi->ops;
+ 
+-			if (ops && ops->token_rx_dmad_deinit)
+-				ret = ops->token_rx_dmad_deinit(wifi->hw.priv,
+-												token_id);
+-		}
+-#endif
++	if (wed)
+ 		ret = 0;
+-	}
+ 
+-err:
+ 	return ret;
+ }
+ #endif	/* WED_RX_D_SUPPORT */
+@@ -908,7 +892,7 @@ wed_proc_handle(struct wed_entry *wed, char choice, char *arg)
+ 
+ 	case WED_PROC_TX_DYNAMIC_FREE: {
+ 		if(IS_WED_HW_CAP(wed, WED_HW_CAP_DYN_TXBM))
+-			buf_free_task((unsigned long)wed);
++			buf_free_task(wed);
+ 		else
+ 			warp_dbg(WARP_DBG_ERR, "DYBM is not enabled!\n");
+ 	}
+@@ -1176,4 +1160,3 @@ void wed_procinfo_dump(struct wed_entry *wed, struct seq_file *seq, int idx)
+ 		}
+ 	}
+ }
+-

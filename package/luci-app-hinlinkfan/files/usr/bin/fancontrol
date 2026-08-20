@@ -1,0 +1,44 @@
+#!/bin/sh
+# .................................
+# ......pwm_fan......
+# if lsmod | grep -q pwm_fan
+# then
+#         rmmod pwm_fan
+# fi
+# .........PWM......
+# echo 0 > /sys/class/pwm/pwmchip0/export
+# echo 40000 > /sys/class/pwm/pwmchip0/pwm0/period
+# # duty_cycle... [10000 = 25%......] [20000 = 50%......] [30000 = 75%......] [40000 = 100%......]
+# echo 20000 > /sys/class/pwm/pwmchip0/pwm0/duty_cycle
+# echo normal > /sys/class/pwm/pwmchip0/pwm0/polarity
+# echo 0 > /sys/class/pwm/pwmchip0/pwm0/enable
+
+enable=$(uci -q get hinlinkfan.@global[0].enable)
+Fan_Start_Temp=$(uci -q get hinlinkfan.@global[0].on_temp)
+Fan_Stop_Temp=$(uci -q get hinlinkfan.@global[0].off_temp)
+echo 250 > /sys/class/hwmon/hwmon2/pwm1
+
+if [[ $enable -eq 1 ]]; then
+        while true
+        do
+                Core_Temp=$(cut -c1-2 /sys/class/thermal/thermal_zone0/temp)
+                if [ "$Core_Temp" -ge "$Fan_Start_Temp" ] 
+                then
+                        Fan_Mo=$(((Core_Temp-Fan_Start_Temp)+100+Fan_Start_Temp))
+                        if [ "$Fan_Mo" -ge "200" ] 
+                        then
+                                $Fan_Mo = 200
+                        fi
+                        # echo 1 > /sys/class/pwm/pwmchip0/pwm0/enable
+                        echo $Fan_Mo > /sys/class/hwmon/hwmon2/pwm1
+                elif [ ${Core_Temp} -le ${Fan_Stop_Temp} ] 
+                then
+                        # echo 0 > /sys/class/pwm/pwmchip0/pwm0/enable
+                        echo 0 > /sys/class/hwmon/hwmon2/pwm1
+                fi
+                sleep 10
+        done
+else
+        echo 0 > /sys/class/hwmon/hwmon2/pwm1
+fi
+exit 1

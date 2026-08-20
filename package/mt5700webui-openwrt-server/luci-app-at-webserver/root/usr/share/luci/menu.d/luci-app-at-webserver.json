@@ -1,0 +1,36 @@
+{
+	"admin/services/at-webserver": {
+		"title": "AT WebServer",
+		"order": -10,
+		"action": {
+			"type": "firstchild"
+		},
+		"depends": {
+			"acl": [ "luci-app-at-webserver" ]
+		}
+	},
+	"admin/services/at-webserver/home": {
+		"title": "首页",
+		"order": 10,
+		"action": {
+			"type": "view",
+			"path": "at-webserver/home"
+		}
+	},
+	"admin/services/at-webserver/config": {
+		"title": "配置",
+		"order": 20,
+		"action": {
+			"type": "view",
+			"path": "at-webserver/config"
+		}
+	},
+	"admin/services/at-webserver/logs": {
+		"title": "日志查看",
+		"order": 30,
+		"action": {
+			"type": "view",
+			"path": "at-webserver/logs"
+		}
+	}
+}

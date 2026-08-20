@@ -1,0 +1,16 @@
+From 90dc8fd36078a536671adae884d0b929cce6480a Mon Sep 17 00:00:00 2001
+From: Vladimir Oltean <vladimir.oltean@nxp.com>
+Date: Wed, 6 Jan 2021 11:51:30 +0200
+Subject: [PATCH] net: bridge: notify switchdev of disappearance of old FDB
+ entry upon migration
+
+--- a/net/bridge/br_fdb.c
++++ b/net/bridge/br_fdb.c
+@@ -589,7 +589,8 @@ void br_fdb_update(struct net_bridge *br
+ 			/* fastpath: update of existing entry */
+ 			if (unlikely(source != fdb->dst &&
+ 				     !test_bit(BR_FDB_STICKY, &fdb->flags))) {
++				br_switchdev_fdb_notify(fdb, RTM_DELNEIGH);
+ 				fdb->dst = source;
+ 				fdb_modified = true;
+ 				/* Take over HW learned entry */

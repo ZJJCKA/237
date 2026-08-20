@@ -1,0 +1,28 @@
+#!/bin/sh /etc/rc.common
+# 发送 AT+CFUN 命令的启动脚本
+
+START=99
+STOP=15
+
+start() {
+    # 等待 15秒
+    sleep 15
+
+    # 发送 AT+CFUN=0
+    echo "Sending AT+CFUN=0..."
+    sendat 1 'AT+CFUN=0'
+
+    # 等待 2 秒
+    sleep 2
+
+    # 发送 AT+CFUN=1
+    echo "Sending AT+CFUN=1..."
+    sendat 1 'AT+CFUN=1'
+
+    # 记录日志
+    echo "AT commands executed at $(date)" >> /tmp/sendat-cfun.log
+}
+
+stop() {
+    echo "Stopping sendat-cfun script..."
+}

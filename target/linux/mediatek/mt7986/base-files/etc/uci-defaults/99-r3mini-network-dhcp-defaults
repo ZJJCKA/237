@@ -1,0 +1,31 @@
+#!/bin/sh
+set -e
+
+. /lib/functions.sh
+. /lib/functions/system.sh
+
+[ "$(board_name)" = "bananapi,bpi-r3mini-emmc" ] || exit 0
+
+uci -q get network.lan >/dev/null 2>&1 || exit 1
+uci -q get dhcp.@dnsmasq[0] >/dev/null 2>&1 || exit 1
+uci -q get dhcp.lan >/dev/null 2>&1 || exit 1
+
+uci set network.lan.device='br-lan'
+uci set network.lan.proto='static'
+uci set network.lan.ipaddr='192.168.66.1'
+uci set network.lan.netmask='255.255.255.0'
+uci set network.lan.ip6assign='60'
+uci -q delete network.lan.dns || true
+uci add_list network.lan.dns='223.5.5.5'
+uci add_list network.lan.dns='223.6.6.6'
+uci commit network
+
+uci set dhcp.@dnsmasq[0].sequential_ip='1'
+uci set dhcp.lan.start='2'
+uci set dhcp.lan.limit='253'
+uci set dhcp.lan.leasetime='12h'
+uci set dhcp.lan.dhcpv4='server'
+uci set dhcp.lan.ra='server'
+uci commit dhcp
+
+exit 0
